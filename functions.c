@@ -963,7 +963,7 @@ int rebuild(struct Argument_Variables arg_vars) {
         else if(bytes_read > 0) {
 
             /* Check if the end offset is within the current line */
-            if(arg_vars.end_offset - total_bytes_converted < arg_vars.bytes_per_line) {
+            if(arg_vars.end_offset != 0 && arg_vars.end_offset - total_bytes_converted < arg_vars.bytes_per_line) {
 
                 /* Place the null terminator
                  * starting from the front
