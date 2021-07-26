@@ -583,34 +583,6 @@ uint8_t contains(uint8_t value, uint8_t* values, size_t values_length) {
     return 0;
 }
 
-/* A function used to seek x amount of bytes,
- * excluding specific byte values from the count */
-int seek_to_excluding(size_t num_bytes, uint8_t* exclude_values, size_t exclude_values_length, FILE* file) {
-
-    /* Byte data buffer */
-    uint8_t byte = 0;
-
-    size_t total_bytes_read = 0;
-
-    while(total_bytes_read < num_bytes) {
-
-        /* read some bytes from the given file */
-        size_t bytes_read = fread(&byte, 1, 1, file);
-
-        /* check for errors or eof */
-        if(bytes_read == 0 && (ferror(file) || feof(file))) {
-            return -1;
-        }
-
-        if(!contains(byte, exclude_values, exclude_values_length)) {
-            total_bytes_read++;
-        }
-    }
-
-    return 0;
-}
-
-
 /* Function to read extreneous lines in a file.
  * A buffer equal to line_size will be allocated,
  * and num_lines lines will be read from the file, file.
@@ -648,116 +620,148 @@ ssize_t read_extreneous_lines(size_t line_size, size_t num_lines, FILE* file) {
 /* Function that implements the rebuild functionality for a plain dump */
 int plain_rebuild(struct Argument_Variables arg_vars) {
 
-    /* check if seeking needs to be done */
-    if(arg_vars.start_offset > 0) {
-
-        uint8_t exclude = '\n';
-
-        /* Attempt to seek to the given offset */
-        /* the *2 is because a single byte constitutes for 2 hex characters */
-        if(seek_to_excluding(arg_vars.start_offset * 2, &exclude, 1, arg_vars.file) < 0) {
-
-            /* if failed, close our file */
-            fclose(arg_vars.file);
-            fprintf(stderr, "Failed to seek to the supplied start offset\n");
-            return 1;
-        }
-    }
     /* Allocate a buffer long enough 
      * for one line of hex bytes, a null 
      * terminator and a newline */
-    size_t buffer_size = arg_vars.bytes_per_line * 2 + 2;
-    char* buffer = malloc(buffer_size);
+    size_t line_size = arg_vars.bytes_per_line * 2 + 1;
+    char* buffer = malloc(line_size + 1);
 
-    /* Allocate a buffer to hold the binary data, +1 for null terminator*/
+    /* Allocate a buffer to hold the binary data.*/
     uint8_t* binary_data_buffer = malloc(arg_vars.bytes_per_line);
 
     /* A variable to keep track of the total bytes converted */
-    size_t total_bytes_converted = arg_vars.start_offset;
+    size_t total_bytes_converted = 0;
 
-    /* if there was a start offset, that isn't a multiple of the number
-     * of bytes per line, we have to read the remaining bytes in the line
-     * otherwise the loop below might be slightly incorrect. */
-    if(arg_vars.start_offset % arg_vars.bytes_per_line != 0) {
+    /* Check if the start offset was set */
+    if(arg_vars.start_offset > 0) {
 
-        /*  we need to read the remainder of the line, 2 chars for a single hex byte, hence *2
-         *  ,plus the newline, hence the +1 */
-        size_t bytes_read = fread(buffer, 1, (arg_vars.start_offset % arg_vars.bytes_per_line) * 2 + 1, arg_vars.file);
-
-        /* Check for errors */
-        if(bytes_read == 0 && ferror(arg_vars.file)) {
-
-            fprintf(stderr, "Error encountered when reading from the input file\n");
-            free(buffer);
-            free(binary_data_buffer);
-            fclose(arg_vars.file);
-
-            return 1;
-        }
-
-        /* Place the null terminator */
-        buffer[bytes_read] = '\0';
-
-        /* Convert the hex characters to binary data */
-        ssize_t bytes_converted = hex_string_to_binary_data(buffer, binary_data_buffer);
-        if(0 > bytes_converted) {
-
-            /* Report an invalid hex string, and start termination */
-            fprintf(stderr, "Error, Invalid hex string encountered, the cultprit: \n");
-            fprintf(stderr, "%s\n", buffer);
-
-            free(buffer);
-            free(binary_data_buffer);
-            fclose(arg_vars.file);
-
-            return 1;
-        }
-
-        /* Write the data to stdout */
-        size_t bytes_written = fwrite(binary_data_buffer, 1, bytes_converted, stdout);
-        while(bytes_written < bytes_converted) {
-
-            bytes_written += fwrite(&binary_data_buffer[bytes_written], 1, bytes_converted - bytes_written, stdout);
-            if(bytes_written == 0 && ferror(stdout)) {
-                fprintf(stderr, "Failed to write binary data to stdout\n");
-
+        /* If stdin get rid of the extreneous lines */
+        if(arg_vars.file == stdin) {
+            if(0 > read_extreneous_lines(line_size, arg_vars.start_offset / arg_vars.bytes_per_line, arg_vars.file)) {
+                fprintf(stderr, "Failed to read to start offset when rebuilding\n");
                 free(buffer);
                 free(binary_data_buffer);
                 fclose(arg_vars.file);
-
-                return 1;
+                return -1;
             }
         }
 
-        /* increment the total bytes converted */
-        total_bytes_converted += bytes_converted;
+        /* If an actual file was opened, just seek to the proper position */
+        else {
+            if(0 > fseek(arg_vars.file, line_size * (arg_vars.start_offset / arg_vars.bytes_per_line), SEEK_SET)) {
+                fprintf(stderr, "Failed to seek to start offset when rebuilding\n");
+                free(buffer);
+                free(binary_data_buffer);
+                fclose(arg_vars.file);
+                return -1;
+            }
+        }
+
+        total_bytes_converted += arg_vars.start_offset;
+
+
+        /* Convert the remaining bytes of the line in of which the start offset occurred */
+        while(arg_vars.start_offset % arg_vars.bytes_per_line) {
+
+            /* Read the next line from the file */
+            size_t bytes_read = fread(buffer, 1, line_size, arg_vars.file);
+
+            /* Check for various errors and problems */
+            if(bytes_read == 0) {
+
+                /* Eof check */
+                if(feof(arg_vars.file)) {
+                    fprintf(stderr, "Failed to seek to start offset when rebuilding, EOF reached.\n");
+                    free(buffer);
+                    free(binary_data_buffer);
+                    fclose(arg_vars.file);
+                    return -1;
+                }
+                
+                /* Error check */
+                else if(ferror(arg_vars.file)) {
+                    fprintf(stderr, "Failed to seek to start offset when rebuilding, Error encountered when reading from file.\n");
+                    free(buffer);
+                    free(binary_data_buffer);
+                    fclose(arg_vars.file);
+                    return -1;
+                }
+                
+                /* If 0 bytes were read, then try reading them again */
+                continue;
+            }
+
+            /* place the null terminator accordingly */
+            buffer[bytes_read] = '\0';
+
+            /* Start index and end index for the buffer */
+            size_t start_index = (arg_vars.start_offset % arg_vars.bytes_per_line) * 2;
+            size_t end_index = 0;
+
+            /* Set the end index if the start and end offset are on the same line */
+            if(arg_vars.end_offset != 0 && (arg_vars.end_offset - arg_vars.start_offset) < (arg_vars.bytes_per_line - arg_vars.start_offset % arg_vars.bytes_per_line)) {
+
+                end_index = (arg_vars.start_offset + (arg_vars.end_offset - arg_vars.start_offset)) * 2;
+
+                buffer[end_index] ='\0';
+            }
+
+            /* Convert the hex bytes to binary data */
+            ssize_t bytes_converted = hex_string_to_binary_data(&buffer[start_index], binary_data_buffer);
+
+            /* Error encountered when converting the hex bytes */
+            if(bytes_converted < 0) {
+                fprintf(stderr, "Failed to convert hex bytes, culprit line: %s\n", buffer);
+                free(buffer);
+                free(binary_data_buffer);
+                fclose(arg_vars.file);
+                return -1;
+            }
+
+
+            /* Write the binary data to stdout */
+            fwrite(binary_data_buffer, 1, bytes_converted, stdout);
+
+            /* increment the total bytes converted */
+            total_bytes_converted += bytes_converted;
+
+            break;
+        }
     }
 
-    while(!feof(arg_vars.file)) {
 
-        /* Read buffer size -1 bytes, -1 to reserve 
-         * space for the null terminator */
-        size_t bytes_read = 0;
-        if(arg_vars.end_offset != 0 && (arg_vars.end_offset - total_bytes_converted) * 2 < (buffer_size - 1)) {
-            bytes_read = fread(buffer, 1, (arg_vars.end_offset - total_bytes_converted) * 2, arg_vars.file);
+    /* Main conversion loop */
+    while(!feof(arg_vars.file)  && (total_bytes_converted != arg_vars.end_offset || arg_vars.end_offset == 0)) {
+
+        /* Read the next line from the file */
+        size_t bytes_read = fread(buffer, 1, line_size, arg_vars.file);
+
+        /* Check for various errors and problems */
+        if(bytes_read == 0) {
+
+            /* Eof check */
+            if(feof(arg_vars.file)) {
+                fprintf(stderr, "Failed to seek to start offset when rebuilding, EOF reached.\n");
+                free(buffer);
+                free(binary_data_buffer);
+                fclose(arg_vars.file);
+                return -1;
+            }
+
+            /* Error check */
+            else if(ferror(arg_vars.file)) {
+                fprintf(stderr, "Failed to seek to start offset when rebuilding, Error encountered when reading from file.\n");
+                free(buffer);
+                free(binary_data_buffer);
+                fclose(arg_vars.file);
+                return -1;
+            }
+
+            /* If 0 bytes were read, then try reading them again */
+            continue;
         }
-        else {
-            bytes_read = fread(buffer, 1, buffer_size - 1, arg_vars.file);
-        }
-
-
-        /* Check for errors */
-        if(bytes_read == 0 && ferror(arg_vars.file)) {
-
-            fprintf(stderr, "Error encountered when reading from the input file\n");
-            free(buffer);
-            free(binary_data_buffer);
-            fclose(arg_vars.file);
-
-            return 1;
-        }
-
-        /* Place the null terminator accordingly */
+        
+        /* Place null terminator accordingly */
         buffer[bytes_read] = '\0';
 
         /* convert the hex characters to binary data */
@@ -775,27 +779,15 @@ int plain_rebuild(struct Argument_Variables arg_vars) {
             return 1;
         }
 
-        /* write the binary data to stdout  */
-        size_t bytes_written = fwrite(binary_data_buffer, 1, bytes_converted, stdout);
-        while(bytes_written < bytes_converted) {
-
-            bytes_written += fwrite(&binary_data_buffer[bytes_written], 1, bytes_converted - bytes_written, stdout);
-            if(bytes_written == 0 && ferror(stdout)) {
-                fprintf(stderr, "Failed to write binary data to stdout\n");
-
-                free(buffer);
-                free(binary_data_buffer);
-                fclose(arg_vars.file);
-
-                return 1;
-            }
+        /* Check if the end offset is in this buffer of bytes */
+        if(total_bytes_converted + bytes_converted > arg_vars.end_offset) {
+            /* Increment the total bytes converted, and write the data to stdout */
+            total_bytes_converted += fwrite(binary_data_buffer, 1, arg_vars.end_offset - total_bytes_converted, stdout);
         }
 
-        total_bytes_converted += bytes_converted;
-
-        /* end offset reached */
-        if(total_bytes_converted == arg_vars.end_offset) {
-            break;
+        else {
+            /* Increment the total bytes converted, and write the data to stdout */
+            total_bytes_converted += fwrite(binary_data_buffer, 1, bytes_converted, stdout);
         }
     }
 
@@ -853,6 +845,9 @@ int rebuild(struct Argument_Variables arg_vars) {
         if(arg_vars.file == stdin) {
             if(0 > read_extreneous_lines(line_size, arg_vars.start_offset / arg_vars.bytes_per_line, arg_vars.file)) {
                 fprintf(stderr, "Failed to read to start offset when rebuilding\n");
+                free(buffer);
+                free(binary_data_buffer);
+                fclose(arg_vars.file);
                 return -1;
             }
         }
@@ -863,6 +858,9 @@ int rebuild(struct Argument_Variables arg_vars) {
             if(0 > fseek(arg_vars.file, (arg_vars.start_offset / arg_vars.bytes_per_line) * line_size, SEEK_SET)) {
                 fprintf(stderr, "Failed to seek to the start offset\n");
                 fclose(arg_vars.file);
+                free(buffer);
+                free(binary_data_buffer);
+                fclose(arg_vars.file);
                 return -1;
             }
         }
@@ -871,15 +869,57 @@ int rebuild(struct Argument_Variables arg_vars) {
         total_bytes_converted += arg_vars.start_offset;
 
         /* Read the extrenous bytes remaining, and convert the rest, only done if there is a remainder */
-        if(arg_vars.start_offset % arg_vars.bytes_per_line != 0) {
-            while(1) {
+        while(arg_vars.start_offset % arg_vars.bytes_per_line) {
 
-                /* Read a lines worth of bytes from the file */
-                size_t bytes_read = fread(buffer, 1, line_size, arg_vars.file);
+            /* Read a lines worth of bytes from the file */
+            size_t bytes_read = fread(buffer, 1, line_size, arg_vars.file);
 
-                /* check for errors */
-                if(bytes_read == 0 && (ferror(arg_vars.file) || feof(arg_vars.file))) {
-                    fprintf(stderr, "Error encountered when seeking to start offset\n");
+            /* check for errors */
+            if(bytes_read == 0 && (ferror(arg_vars.file) || feof(arg_vars.file))) {
+                fprintf(stderr, "Error encountered when seeking to start offset\n");
+
+                free(buffer);
+                free(binary_data_buffer);
+                fclose(arg_vars.file);
+
+                return 1;
+            }
+
+            /* Only do work if bytes were actually read */
+            else if(bytes_read > 0) {
+
+                /* The index to start at, this makes sure
+                 * that we don't convert bytes before the start offset.
+                 * Breaking it down is what follows.
+                 * 18 is the length of the initial offset counter, 
+                 * (!arg_vars.exclude_spaces + 2) determines the multiplier
+                 * of how many bytes to move. *3 means spaces, *2 means no spaces.
+                 * arg_vars.start_offset % arg_vars.bytes_per_line is the remaining
+                 * hex bytes that need to be ignored. */
+                size_t start_index = 18 + (!arg_vars.exclude_spaces + 2) * (arg_vars.start_offset % arg_vars.bytes_per_line);
+
+                /* Check for the case scenario that the start offset and end offset
+                 * are within the same line */
+                if(arg_vars.end_offset != 0 && (arg_vars.end_offset - arg_vars.start_offset) < (arg_vars.bytes_per_line - arg_vars.start_offset % arg_vars.bytes_per_line)) {
+
+                    /* Place the null terminator accordingly */
+                    buffer[start_index + (!arg_vars.exclude_spaces + 2) * (arg_vars.end_offset - arg_vars.start_offset)] = '\0';
+                }
+
+                else {
+                    /* Place a null terminator accordingly,
+                     * the text view at the end of the line is
+                     * equal to the amount of hex bytes displayed
+                     * on the line, +1 for the \n. */
+                    buffer[line_size - (arg_vars.bytes_per_line + 1)] = '\0';
+                }
+
+                /* Convert the hex bytes to binary data */
+                ssize_t bytes_converted = hex_string_to_binary_data(&buffer[start_index], binary_data_buffer);
+
+                /* Check if we failed to convert the hex into binary data */
+                if(bytes_converted < 0) { 
+                    fprintf(stderr, "Failed to convert hex string into binary data.\nThe culprit: %s\n", &buffer[18]);
 
                     free(buffer);
                     free(binary_data_buffer);
@@ -888,57 +928,13 @@ int rebuild(struct Argument_Variables arg_vars) {
                     return 1;
                 }
 
-                /* Only do work if bytes were actually read */
-                else if(bytes_read > 0) {
+                /* Write the binary data to stdout */
+                fwrite(binary_data_buffer, 1, bytes_converted, stdout);
 
-                    /* The index to start at, this makes sure
-                     * that we don't convert bytes before the start offset.
-                     * Breaking it down is what follows.
-                     * 18 is the length of the initial offset counter, 
-                     * (!arg_vars.exclude_spaces + 2) determines the multiplier
-                     * of how many bytes to move. *3 means spaces, *2 means no spaces.
-                     * arg_vars.start_offset % arg_vars.bytes_per_line is the remaining
-                     * hex bytes that need to be ignored. */
-                    size_t start_index = 18 + (!arg_vars.exclude_spaces + 2) * (arg_vars.start_offset % arg_vars.bytes_per_line);
+                /* increment the total bytes converted */
+                total_bytes_converted += bytes_converted;
 
-                    /* Check for the case scenario that the start offset and end offset
-                     * are within the same line */
-                    if(arg_vars.end_offset - arg_vars.start_offset < (arg_vars.start_offset % arg_vars.bytes_per_line)) {
-
-                        /* Place the null terminator accordingly */
-                        buffer[start_index + (arg_vars.end_offset - arg_vars.start_offset)] = '\0';
-                    }
-
-                    else {
-                        /* Place a null terminator accordingly,
-                         * the text view at the end of the line is
-                         * equal to the amount of hex bytes displayed
-                         * on the line, +1 for the \n. */
-                        buffer[line_size - (arg_vars.bytes_per_line + 1)] = '\0';
-                    }
-
-                    /* Convert the hex bytes to binary data */
-                    ssize_t bytes_converted = hex_string_to_binary_data(&buffer[start_index], binary_data_buffer);
-
-                    /* Check if we failed to convert the hex into binary data */
-                    if(bytes_converted < 0) { 
-                        fprintf(stderr, "Failed to convert hex string into binary data.\nThe culprit: %s\n", &buffer[18]);
-
-                        free(buffer);
-                        free(binary_data_buffer);
-                        fclose(arg_vars.file);
-
-                        return 1;
-                    }
-
-                    /* Write the binary data to stdout */
-                    fwrite(binary_data_buffer, 1, bytes_converted, stdout);
-
-                    /* increment the total bytes converted */
-                    total_bytes_converted += bytes_converted;
-                    
-                    break;
-                }
+                break;
             }
         }
     }
